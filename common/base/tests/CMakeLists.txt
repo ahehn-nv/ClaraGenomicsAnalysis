@@ -10,7 +10,7 @@
 
 set(TARGET_NAME cgabasetests)
 
-set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -lineinfo -Xcompiler -Wall,-Wno-pedantic -std=c++14")
+set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} -lineinfo -Xcompiler -Wall,-Wno-pedantic -std=c++14)
 
 set(SOURCES
     main.cpp

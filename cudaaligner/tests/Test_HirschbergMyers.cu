@@ -8,8 +8,9 @@
 * license agreement from NVIDIA CORPORATION is strictly prohibited.
 */
 
-#include "../src/hirschberg_myers_gpu.cu"
+#include "../src/testing_kernels.cuh"
 #include "../src/batched_device_matrices.cuh"
+#include <claragenomics/utils/mathutils.hpp>
 #include <claragenomics/utils/signed_integer_utils.hpp>
 #include <vector>
 #include <gtest/gtest.h>
@@ -22,26 +23,8 @@ namespace cudaaligner
 
 using WordType = hirschbergmyers::WordType;
 
-namespace test
+namespace
 {
-
-__global__ void myers_preprocess_kernel(batched_device_matrices<WordType>::device_interface* batched_query_pattern, char const* query, int32_t query_size)
-{
-    CGA_CONSTEXPR int32_t word_size            = sizeof(WordType) * CHAR_BIT;
-    const int32_t n_words                      = ceiling_divide<int32_t>(query_size, word_size);
-    device_matrix_view<WordType> query_pattern = batched_query_pattern->get_matrix_view(0, n_words, 8);
-    hirschbergmyers::myers_preprocess(query_pattern, query, query_size);
-}
-
-__global__ void myers_get_query_pattern_test_kernel(int32_t n_words, WordType* result, batched_device_matrices<WordType>::device_interface* batched_query_pattern, int32_t idx, char x, bool reverse)
-{
-    int const i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < 32)
-    {
-        device_matrix_view<WordType> patterns = batched_query_pattern->get_matrix_view(0, n_words, 8);
-        result[i]                             = hirschbergmyers::get_query_pattern(patterns, idx, i, x, reverse);
-    }
-}
 
 matrix<WordType> compute_myers_preprocess_matrix(std::string query_host)
 {
@@ -54,7 +37,7 @@ matrix<WordType> compute_myers_preprocess_matrix(std::string query_host)
     CGA_CU_CHECK_ERR(cudaMemcpy(query.data(), query_host.data(), sizeof(char) * query.size(), cudaMemcpyHostToDevice));
 
     batched_device_matrices<WordType> query_pattern(1, 8 * n_words, allocator, stream);
-    myers_preprocess_kernel<<<1, 32>>>(query_pattern.get_device_interface(), query.data(), query.size());
+    testing::launch_myers_preprocess_kernel(1, 32, query_pattern.get_device_interface(), query.data(), query.size());
     return query_pattern.get_matrix(0, n_words, 8, stream);
 }
 
@@ -67,23 +50,22 @@ std::vector<WordType> myers_get_query_pattern_test(std::string query_host, int32
     device_buffer<char> query(query_host.size(), allocator);
     CGA_CU_CHECK_ERR(cudaMemcpy(query.data(), query_host.data(), sizeof(char) * query.size(), cudaMemcpyHostToDevice));
     batched_device_matrices<WordType> query_pattern(1, 8 * n_words, allocator, stream);
-    myers_preprocess_kernel<<<1, 32>>>(query_pattern.get_device_interface(), query.data(), query.size());
+    testing::launch_myers_preprocess_kernel(1, 32, query_pattern.get_device_interface(), query.data(), query.size());
 
     device_buffer<WordType> result(32, allocator);
-    myers_get_query_pattern_test_kernel<<<1, 32>>>(n_words, result.data(), query_pattern.get_device_interface(), idx, x, reverse);
+    testing::launch_myers_get_query_pattern_test_kernel(1, 32, n_words, result.data(), query_pattern.get_device_interface(), idx, x, reverse);
 
     std::vector<WordType> result_host(result.size());
     cudaMemcpy(result_host.data(), result.data(), sizeof(WordType) * result.size(), cudaMemcpyDeviceToHost);
     return result_host;
 }
 
-} // namespace test
+} // namespace
 
 TEST(HirschbergMyers, myers_preprocess_test)
 {
     CGA_CONSTEXPR int32_t word_size = sizeof(WordType) * CHAR_BIT;
     static_assert(word_size == 32, "This test assumes word_size = 32bit.");
-    using test::compute_myers_preprocess_matrix;
     std::string query =
         "AACCGGTTACGTACGT"
         "AAACCCGGGTTTACGT"
@@ -136,8 +118,6 @@ TEST(HirschbergMyers, myers_get_query_pattern)
 {
     CGA_CONSTEXPR int32_t word_size = sizeof(WordType) * CHAR_BIT;
     static_assert(word_size == 32, "This test assumes word_size = 32bit.");
-    using test::compute_myers_preprocess_matrix;
-    using test::myers_get_query_pattern_test;
     std::string query =
         "AACCGGTTACGTACGT"
         "AAACCCGGGTTTACGT"
@@ -167,8 +147,6 @@ TEST(HirschbergMyers, myers_get_query_pattern_reverse)
 {
     CGA_CONSTEXPR int32_t word_size = sizeof(WordType) * CHAR_BIT;
     static_assert(word_size == 32, "This test assumes word_size = 32bit.");
-    using test::compute_myers_preprocess_matrix;
-    using test::myers_get_query_pattern_test;
     std::string query =
         "AACCGGTTACGTACGT"
         "AAACCCGGGTTTACGT"

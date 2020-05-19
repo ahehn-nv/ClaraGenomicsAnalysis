@@ -232,7 +232,7 @@ __device__ void myers_preprocess(device_matrix_view<WordType>& query_pattern, ch
     }
 }
 
-inline __device__ WordType get_query_pattern(device_matrix_view<WordType>& query_patterns, int32_t idx, int32_t query_begin_offset, char x, bool reverse)
+__device__ WordType get_query_pattern(device_matrix_view<WordType>& query_patterns, int32_t idx, int32_t query_begin_offset, char x, bool reverse)
 {
     static_assert(std::is_unsigned<WordType>::value, "WordType has to be an unsigned type for well-defined >> operations.");
     const int32_t char_idx = [](char x) -> int32_t {

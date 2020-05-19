@@ -30,6 +30,10 @@ struct query_target_range
     char const* target_begin = nullptr;
     char const* target_end   = nullptr;
 };
+
+__device__ void myers_preprocess(device_matrix_view<WordType>& query_pattern, char const* query, int32_t query_size);
+
+__device__ WordType get_query_pattern(device_matrix_view<WordType>& query_patterns, int32_t idx, int32_t query_begin_offset, char x, bool reverse);
 } // namespace hirschbergmyers
 
 void hirschberg_myers_gpu(device_buffer<hirschbergmyers::query_target_range>& stack_buffer,

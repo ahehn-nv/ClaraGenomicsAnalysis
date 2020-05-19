@@ -14,7 +14,7 @@ project(cudapoa)
 add_subdirectory(data)
 
 # Project specific NVCC flags
-set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -std=c++11")
+set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} -std=c++11)
 
 get_property(cga_library_type GLOBAL PROPERTY cga_library_type)
 cuda_add_library(cudapoa ${cga_library_type}

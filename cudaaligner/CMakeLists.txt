@@ -12,9 +12,9 @@ project(cudaaligner)
 
 # Project specific NVCC flags
 if((CUDA_VERSION_MAJOR GREATER 10) OR (CUDA_VERSION_MAJOR EQUAL 10 AND CUDA_VERSION_MINOR GREATER 0))
-set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -std=c++14 --expt-relaxed-constexpr")
+set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} -std=c++14 --expt-relaxed-constexpr)
 else()
-set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -std=c++14")
+set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS} -std=c++14)
 endif()
 
 get_property(cga_library_type GLOBAL PROPERTY cga_library_type)
@@ -33,6 +33,7 @@ cuda_add_library(cudaaligner ${cga_library_type}
     src/ukkonen_gpu.cu
     src/myers_gpu.cu
     src/hirschberg_myers_gpu.cu
+    src/testing_kernels.cu
     )
 
 add_library(cudaaligner_internal INTERFACE)
