@@ -20,6 +20,7 @@
 #include <stdexcept>
 #include <iostream>
 #include <random>
+#include <fstream>
 
 using namespace claragenomics;
 using namespace claragenomics::genomeutils;
@@ -67,6 +68,80 @@ void generate_data(std::vector<std::pair<std::string, std::string>>& data,
     }
 }
 
+struct alignment_task
+{
+    std::string query;
+    std::string target;
+    bool query_reverse_strand;
+    bool target_reverse_strand;
+};
+
+void throw_on_invalid_dna_sequence(const std::string& seq, const int32_t counter)
+{
+    const int32_t len = get_size<int32_t>(seq);
+    for(int32_t c = 0; c < len; ++c)
+    {
+        const char x = seq[c];
+        if(x != 'A' && x != 'C' && x != 'G' && x != 'T' && x != '\n')
+        {
+            throw std::runtime_error(std::string("Not a valid sequence: input file entry:") + std::to_string(counter) + " in char: " + std::to_string(c) + ", seq: " + seq);
+        }
+    }
+}
+
+std::vector<alignment_task> load_from_file(const std::string& filename, int32_t max_entries)
+{
+    std::vector<alignment_task> alignments;
+    std::ifstream infile(filename);
+
+    int32_t counter = 0;
+    try{
+        while(infile.good())
+        {
+                alignment_task x;
+                char fwd = 0;
+                infile >> fwd;
+                x.query_reverse_strand = (fwd == 'R');
+                infile >> x.query;
+                throw_on_invalid_dna_sequence(x.query, counter);
+                infile >> fwd;
+                x.target_reverse_strand = (fwd == 'R');
+                infile >> x.target;
+                throw_on_invalid_dna_sequence(x.target, counter);
+                infile >> fwd;
+                if(fwd != '\n')
+                    std::runtime_error("Expected a newline in file.");
+                alignments.push_back(std::move(x));
+            if(get_size(alignments) >= max_entries)
+                break;
+            ++counter;
+        }
+    } catch (...)
+    {
+    }
+
+    return alignments;
+}
+
+void perform_alignments(Aligner* batch, const bool print)
+{
+    // Launch alignment on the GPU. align_all is an async call.
+    batch->align_all();
+    // Synchronize all alignments.
+    batch->sync_alignments();
+    if (print)
+    {
+        const std::vector<std::shared_ptr<Alignment>>& alignments = batch->get_alignments();
+        for (const auto& alignment : alignments)
+        {
+            FormattedAlignment formatted = alignment->format_alignment();
+            std::cout << formatted;
+        }
+    }
+    // Reset batch to reuse memory for new alignments.
+    batch->reset();
+}
+
 int main(int argc, char** argv)
 {
     // Process options
@@ -97,62 +172,59 @@ int main(int argc, char** argv)
         std::exit(0);
     }
 
-    const int32_t query_length  = 10000;
-    const int32_t target_length = 15000;
-    const uint32_t num_entries  = 1000;
+    const int32_t num_entries  = 100000;
+    const int32_t batch_size   = 20000;
+    std::vector<alignment_task> data = load_from_file("/archive/ahehn/genomics/alignments_dump.dat", num_entries);
+    
+    int32_t max_query_length  = 0;
+    int32_t max_target_length = 0;
+    std::vector<int32_t> query_lengths;
+    std::vector<int32_t> target_lengths;
+    for(auto const& entry : data)
+    {
+        max_query_length = std::max(max_query_length, get_size<int32_t>(entry.query));
+        max_target_length = std::max(max_target_length, get_size<int32_t>(entry.target));
+        query_lengths.push_back(get_size<int32_t>(entry.query));
+        target_lengths.push_back(get_size<int32_t>(entry.target));
+    }
+    std::cout << "max query length: " << max_query_length << "\t max target length: " << max_target_length << std::endl;
+    sort(begin(query_lengths),end(query_lengths));
+    sort(begin(target_lengths),end(target_lengths));
+    std::cout << "query length percentiles: 10%: " << query_lengths[get_size(query_lengths)/10] << "\t 50%: " << query_lengths[get_size(query_lengths)/2] << "\t 90%: " << query_lengths[9*get_size(query_lengths)/10] << std::endl;
+    std::cout << "target length percentiles: 10%: " << target_lengths[get_size(target_lengths)/10] << "\t 50%: " << target_lengths[get_size(target_lengths)/2] << "\t 90%: " << target_lengths[9*get_size(target_lengths)/10] << std::endl;
 
     const std::size_t max_gpu_memory                = claragenomics::cudautils::find_largest_contiguous_device_memory_section();
     claragenomics::DefaultDeviceAllocator allocator = create_default_device_allocator(max_gpu_memory);
 
-    std::cout << "Running pairwise alignment for " << num_entries << " pairs..." << std::endl;
 
     // Initialize batch.
-    std::unique_ptr<Aligner> batch = initialize_batch(query_length, target_length, 100, allocator);
+    std::unique_ptr<Aligner> batch = initialize_batch(max_query_length, max_target_length, batch_size, allocator);
 
     // Generate data.
-    std::vector<std::pair<std::string, std::string>> data;
-    generate_data(data, query_length, target_length, num_entries);
-    assert(data.size() == num_entries);
+//    std::vector<std::pair<std::string, std::string>> data;
+//    generate_data(data, query_length, target_length, num_entries);
+    std::cout << "Running pairwise alignment for " << get_size(data) << " pairs..." << std::endl;
 
     // Loop over all the alignment pairs, add them to the batch and process them.
-    uint32_t data_id = 0;
-    while (data_id != num_entries)
+    int32_t counter = 0;
+    for(auto const& entry : data)
     {
-        const std::string& query  = data[data_id].first;
-        const std::string& target = data[data_id].second;
-
         // Add a pair to the batch, and check for status.
-        StatusType status = batch->add_alignment(query.c_str(), query.length(), target.c_str(), target.length());
-        if (status == exceeded_max_alignments || data_id == num_entries - 1)
+        StatusType status = batch->add_alignment(entry.query.c_str(), entry.query.length(), entry.target.c_str(), entry.target.length());
+        if (status == exceeded_max_alignments)
         {
-            // Launch alignment on the GPU. align_all is an async call.
-            batch->align_all();
-            // Synchronize all alignments.
-            batch->sync_alignments();
-            if (print)
-            {
-                const std::vector<std::shared_ptr<Alignment>>& alignments = batch->get_alignments();
-                for (const auto& alignment : alignments)
-                {
-                    FormattedAlignment formatted = alignment->format_alignment();
-                    std::cout << formatted;
-                }
-            }
-            // Reset batch to reuse memory for new alignments.
-            batch->reset();
-            std::cout << "Aligned till " << (data_id - 1) << "." << std::endl;
+            perform_alignments(batch.get(), print);
+            std::cout << "Aligned till " << counter << "." << std::endl;
+            status = batch->add_alignment(entry.query.c_str(), entry.query.length(), entry.target.c_str(), entry.target.length());
         }
-        else if (status != success)
+        if (status != success)
         {
             throw std::runtime_error("Experienced error type " + std::to_string(status));
         }
-
-        // If alignment was add successfully, increment counter.
-        if (status == success)
-        {
-            data_id++;
-        }
+        ++counter;
     }
+    perform_alignments(batch.get(), print);
+    std::cout << "Aligned till " << counter << "." << std::endl;
 
     return 0;
 }

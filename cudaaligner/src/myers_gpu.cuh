@@ -44,13 +44,16 @@ void myers_banded_gpu(int8_t* paths_d, int32_t* path_lengths_d, int32_t max_path
                       int32_t const* sequence_lengths_d,
                       int32_t max_sequence_length,
                       int32_t n_alignments,
+                      int32_t griddim,
                       device_buffer<int32_t>& n_alignments_atomics,
-                      device_buffer<int32_t>& alignment_indices_0,
-                      device_buffer<int32_t>& alignment_indices_1,
+                      device_buffer<int2>& alignment_states_0,
+                      device_buffer<int2>& alignment_states_1,
                       batched_device_matrices<myers::WordType>& pv,
                       batched_device_matrices<myers::WordType>& mv,
                       batched_device_matrices<int32_t>& score,
                       batched_device_matrices<myers::WordType>& query_patterns,
                       cudaStream_t stream);
+
+int32_t myers_banded_gpu_compute_griddim(int32_t device_id, int32_t n_alignments);
 } // end namespace cudaaligner
 } // end namespace claragenomics

@@ -36,21 +36,6 @@ namespace cudaaligner
 
 constexpr int32_t warp_size = 32;
 
-namespace
-{
-
-int32_t compute_number_of_blocks_for_current_device(void(*kernel), int32_t desired_blocks, int32_t block_dim, size_t dyn_shared_mem_size)
-{
-    int32_t device_id       = 0;
-    int32_t device_sm_count = 0;
-    int32_t blocks_per_sm   = 0;
-    CGA_CU_CHECK_ERR(cudaGetDevice(&device_id));
-    CGA_CU_CHECK_ERR(cudaDeviceGetAttribute(&device_sm_count, cudaDevAttrMultiProcessorCount, device_id));
-    CGA_CU_CHECK_ERR(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks_per_sm, kernel, block_dim, dyn_shared_mem_size));
-    return std::min(device_sm_count * blocks_per_sm, desired_blocks);
-}
-
-} // namespace
 
 namespace myers
 {
@@ -719,7 +704,7 @@ myers_compute_scores_edit_dist_banded(
     }
 }
 
-__device__ bool myers_banded_kernel_impl(
+__device__ int32_t myers_banded_kernel_impl(
     int8_t* paths_base,
     int32_t* path_lengths,
     const int32_t max_path_length,
@@ -728,8 +713,9 @@ __device__ bool myers_banded_kernel_impl(
     batched_device_matrices<int32_t>::device_interface* scorei,
     batched_device_matrices<WordType>::device_interface* query_patternsi,
     char const* sequences_d, int32_t const* sequence_lengths_d,
-    int32_t max_sequence_length,
-    int32_t alignment_idx)
+    const int32_t max_sequence_length,
+    const int32_t alignment_idx,
+    int32_t max_distance_estimate)
 {
     assert(warpSize == warp_size);
     assert(threadIdx.x < warp_size);
@@ -765,7 +751,10 @@ __device__ bool myers_banded_kernel_impl(
     // and compute the maximal band of the NW matrix which is required for this distance.
     // If the computed distance is smaller accept and compute the backtrace/path,
     // otherwise retry with a larger guess (i.e. and larger band).
-    int32_t max_distance_estimate = max(1, abs(target_size - query_size) + min(target_size, query_size) / initial_distance_guess_factor);
+    if(max_distance_estimate == 0)
+    {
+        max_distance_estimate = max(1, abs(target_size - query_size) + min(target_size, query_size) / initial_distance_guess_factor);
+    }
     while (1)
     {
         int32_t p          = min3(target_size, query_size, (max_distance_estimate - abs(target_size - query_size)) / 2);
@@ -781,7 +770,7 @@ __device__ bool myers_banded_kernel_impl(
         {
             // We don't have enough memory -> abort
             __syncwarp();
-            return false;
+            return max_distance_estimate;
         }
 
         device_matrix_view<WordType> pv   = pvi->get_matrix_view(blockIdx.y, n_words_band, target_size + 1);
@@ -804,16 +793,16 @@ __device__ bool myers_banded_kernel_impl(
         max_distance_estimate *= 2;
     }
     __syncwarp();
-    return true;
+    return 0;
 }
 
-__device__ void initialize_alignment_indices(int32_t* alignment_indices_1, int32_t* alignment_indices_2, int32_t* n_alignments_atomics, int32_t n_alignments)
+__device__ void initialize_alignment_indices(int2* alignment_states_1, int2* alignment_states_2, int32_t* n_alignments_atomics, int32_t n_alignments)
 {
     for (int32_t i = blockDim.x * blockIdx.x + threadIdx.x; i < n_alignments; i += blockDim.x * gridDim.x)
     {
-        alignment_indices_1[i] = i;
+        alignment_states_1[i] = make_int2(i, 0);
 #ifndef DNDEBUG
-        alignment_indices_2[i] = -1;
+        alignment_states_2[i] = make_int2(-1, 0);
 #endif
     }
     if (blockIdx.x == 0 && threadIdx.x == 0)
@@ -823,21 +812,24 @@ __device__ void initialize_alignment_indices(int32_t* alignment_indices_1, int32
     }
 }
 
-__device__ int32_t get_next_alignment_idx_sync(int32_t* alignment_indices_0, int32_t* n_alignment_atomic, int32_t n_remaining_alignments)
+__device__ int2 get_next_alignment_idx_sync(int2* alignment_states_0, int32_t* n_alignment_atomic, int32_t n_remaining_alignments)
 {
-    int32_t alignment_idx = -1;
+    int2 alignment_idx = make_int2(-1, 0);
     if (threadIdx.x == 0)
     {
         const int32_t i = atomicAdd(n_alignment_atomic, 1);
         if (i < n_remaining_alignments)
         {
-            alignment_idx = alignment_indices_0[i];
+            alignment_idx = alignment_states_0[i];
+
 #ifndef DNDEBUG
-            alignment_indices_0[i] = -1;
+            alignment_states_0[i] = make_int2(-1, 0);
 #endif
         }
     }
-    return __shfl_sync(0xffff'ffffu, alignment_idx, 0);
+    alignment_idx.x = __shfl_sync(0xffff'ffffu, alignment_idx.x, 0);
+    alignment_idx.y = __shfl_sync(0xffff'ffffu, alignment_idx.y, 0);
+    return alignment_idx;
 }
 
 __global__ void myers_banded_kernel(
@@ -850,8 +842,8 @@ __global__ void myers_banded_kernel(
     batched_device_matrices<WordType>::device_interface* query_patternsi,
     char const* sequences_d, int32_t const* sequence_lengths_d,
     int32_t max_sequence_length,
-    int32_t* alignment_indices_0,
-    int32_t* alignment_indices_1,
+    int2* alignment_states_0,
+    int2* alignment_states_1,
     int32_t* n_alignments_atomics,
     int32_t n_remaining_alignments)
 {
@@ -860,7 +852,7 @@ __global__ void myers_banded_kernel(
     cooperative_groups::grid_group grid = cooperative_groups::this_grid();
     if (threadIdx.y == 0 && threadIdx.z == 0 && blockIdx.y == 0 && blockIdx.z == 0)
     {
-        initialize_alignment_indices(alignment_indices_0, alignment_indices_1, n_alignments_atomics, n_remaining_alignments);
+        initialize_alignment_indices(alignment_states_0, alignment_states_1, n_alignments_atomics, n_remaining_alignments);
     }
     sync(grid);
 
@@ -870,6 +862,9 @@ __global__ void myers_banded_kernel(
         {
             const int64_t max_elements_per_matrix64 = scorei->get_storage_size() / n_parallel_alignments;
             const int32_t max_elements_per_matrix   = min(max_elements_per_matrix64, static_cast<int64_t>(numeric_limits<int32_t>::max()));
+#ifdef CGA_MYERS_DEBUG
+            printf("need to do: %d alignments with %d warps with %d matrix elements", n_remaining_alignments, n_parallel_alignments, max_elements_per_matrix);
+#endif 
             pvi->restructure(n_parallel_alignments, max_elements_per_matrix);
             mvi->restructure(n_parallel_alignments, max_elements_per_matrix);
             scorei->restructure(n_parallel_alignments, max_elements_per_matrix);
@@ -880,25 +875,34 @@ __global__ void myers_banded_kernel(
 
         if (blockIdx.y < n_parallel_alignments)
         {
-            int32_t alignment_idx = 0;
-            while ((alignment_idx = get_next_alignment_idx_sync(alignment_indices_0, n_alignments_atomics + 0, n_remaining_alignments)) >= 0)
+            int2 alignment_idx = make_int2(0, 0);
+            while ((alignment_idx = get_next_alignment_idx_sync(alignment_states_0, n_alignments_atomics + 0, n_remaining_alignments)).x >= 0)
             {
-                if (myers_banded_kernel_impl(paths_base, path_lengths, max_path_length, pvi, mvi, scorei, query_patternsi, sequences_d, sequence_lengths_d, max_sequence_length, alignment_idx) == false)
+                int32_t last_edit_distance_threshold
+                    = myers_banded_kernel_impl(paths_base, path_lengths, max_path_length, pvi, mvi, scorei, query_patternsi, sequences_d, sequence_lengths_d, max_sequence_length, alignment_idx.x, alignment_idx.y);
+                if(last_edit_distance_threshold != 0)
                 {
                     if (threadIdx.x == 0)
                     {
-                        alignment_indices_1[atomicAdd(n_alignments_atomics + 1, 1)] = alignment_idx;
+                        const int32_t idx = atomicAdd(n_alignments_atomics + 1, 1);
+                        alignment_states_1[idx] = make_int2(alignment_idx.x, last_edit_distance_threshold);
                     }
                 }
             }
         }
         sync(grid);
         n_remaining_alignments = n_alignments_atomics[1];
+#ifdef CGA_MYERS_DEBUG
+        if(threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0)
+        {
+            printf(" -> need to redo: %d alignments\n", n_remaining_alignments);
+        }
+#endif
         if (n_remaining_alignments == 0)
         {
             break;
         }
-        thrust::swap(alignment_indices_0, alignment_indices_1);
+        thrust::swap(alignment_states_0, alignment_states_1);
         sync(grid);
     }
 }
@@ -1030,9 +1034,10 @@ void myers_banded_gpu(int8_t* paths_d, int32_t* path_lengths_d, int32_t max_path
                       int32_t const* sequence_lengths_d,
                       int32_t max_sequence_length,
                       int32_t n_alignments,
+                      int32_t griddim,
                       device_buffer<int32_t>& n_alignments_atomics,
-                      device_buffer<int32_t>& alignment_indices_0,
-                      device_buffer<int32_t>& alignment_indices_1,
+                      device_buffer<int2>& alignment_states_0,
+                      device_buffer<int2>& alignment_states_1,
                       batched_device_matrices<myers::WordType>& pv,
                       batched_device_matrices<myers::WordType>& mv,
                       batched_device_matrices<int32_t>& score,
@@ -1043,18 +1048,16 @@ void myers_banded_gpu(int8_t* paths_d, int32_t* path_lengths_d, int32_t max_path
     assert(get_size(alignment_indices_0) == n_alignments);
     assert(get_size(alignment_indices_1) == n_alignments);
 
-    const int32_t desired_blocks = n_alignments;
-    const int32_t n_blocks       = compute_number_of_blocks_for_current_device(reinterpret_cast<void*>(myers::myers_banded_kernel), desired_blocks, warp_size, 0);
     const dim3 threads(warp_size, 1, 1);
-    const dim3 blocks(1, n_blocks, 1);
+    const dim3 blocks(1, griddim, 1);
 
     batched_device_matrices<myers::WordType>::device_interface* pvi             = pv.get_device_interface();
     batched_device_matrices<myers::WordType>::device_interface* mvi             = mv.get_device_interface();
     batched_device_matrices<int32_t>::device_interface* scorei                  = score.get_device_interface();
     batched_device_matrices<myers::WordType>::device_interface* query_patternsi = query_patterns.get_device_interface();
 
-    int32_t* alignment_indices_0_ptr  = alignment_indices_0.data();
-    int32_t* alignment_indices_1_ptr  = alignment_indices_1.data();
+    int2* alignment_states_0_ptr  = alignment_states_0.data();
+    int2* alignment_states_1_ptr  = alignment_states_1.data();
     int32_t* n_alignments_atomics_ptr = n_alignments_atomics.data();
 
     void* args[14];
@@ -1068,12 +1071,30 @@ void myers_banded_gpu(int8_t* paths_d, int32_t* path_lengths_d, int32_t max_path
     args[7]  = &sequences_d;
     args[8]  = &sequence_lengths_d;
     args[9]  = &max_sequence_length;
-    args[10] = &alignment_indices_0_ptr;
-    args[11] = &alignment_indices_1_ptr;
+    args[10] = &alignment_states_0_ptr;
+    args[11] = &alignment_states_1_ptr;
     args[12] = &n_alignments_atomics_ptr;
     args[13] = &n_alignments;
 
     CGA_CU_CHECK_ERR(cudaLaunchCooperativeKernel(reinterpret_cast<void*>(myers::myers_banded_kernel), blocks, threads, args, 0, stream));
+#ifdef CGA_MYERS_DEBUG
+    std::cout << "Launched kernel with griddim: " << griddim << std::endl;
+#endif
+}
+
+int32_t myers_banded_gpu_compute_griddim(const int32_t device_id, const int32_t n_alignments)
+{
+    const int32_t blockdim = warp_size;
+    const int32_t dyn_shared_mem_size = 0;
+    const int32_t desired_griddim = n_alignments;
+    int32_t device_sm_count = 0;
+    int32_t blocks_per_sm   = 0;
+    CGA_CU_CHECK_ERR(cudaDeviceGetAttribute(&device_sm_count, cudaDevAttrMultiProcessorCount, device_id));
+    CGA_CU_CHECK_ERR(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks_per_sm, reinterpret_cast<void*>(myers::myers_banded_kernel), blockdim, dyn_shared_mem_size));
+#ifdef CGA_MYERS_DEBUG
+    std::cout << "Could run with griddim" << device_sm_count * blocks_per_sm << std::endl;
+#endif
+    return std::min(device_sm_count * blocks_per_sm, desired_griddim);
 }
 
 } // namespace cudaaligner
