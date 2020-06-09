@@ -13,6 +13,7 @@
 #include "batched_device_matrices.cuh"
 
 #include <claragenomics/utils/mathutils.hpp>
+#include <iostream>
 
 namespace claragenomics
 {
@@ -65,6 +66,7 @@ AlignerGlobalMyersBanded::AlignerGlobalMyersBanded(int32_t max_query_length, int
     : AlignerGlobal(max_query_length, max_target_length, max_alignments, allocator, stream, device_id)
     , workspace_()
 {
+    std::cerr << "AlignerGlobalMyersBanded constructed" << std::endl;
     scoped_device_switch dev(device_id);
     const int32_t max_words_query                   = ceiling_divide<int32_t>(max_query_length, word_size);
     const int64_t max_memory                        = get_size_of_largest_free_memory_block(allocator);

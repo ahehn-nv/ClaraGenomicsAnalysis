@@ -267,6 +267,8 @@ public:
         CGA_CU_ABORT_ON_ERR(memory_resource_->DeviceFree(p));
     }
 
+    /// @brief Get the size of the largest free memory block
+    /// @return returns the size in bytes
     int64_t get_size_of_largest_free_memory_block() const
     {
         return memory_resource_->get_size_of_largest_free_memory_block();
