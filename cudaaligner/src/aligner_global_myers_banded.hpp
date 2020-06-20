@@ -24,6 +24,9 @@ public:
     AlignerGlobalMyersBanded(int32_t max_query_length, int32_t max_target_length, int32_t max_alignments, DefaultDeviceAllocator allocator, cudaStream_t stream, int32_t device_id);
     virtual ~AlignerGlobalMyersBanded();
 
+    static int64_t calc_memory_requirement_per_alignment(int32_t max_query_length, int32_t max_target_length, float max_indel_factor);
+    static int64_t calc_memory_requirement_per_alignment(int32_t max_query_length, int32_t max_target_length);
+
 private:
     struct Workspace;
 
@@ -32,6 +35,7 @@ private:
                                int32_t num_alignments, cudaStream_t stream) override;
 
     std::unique_ptr<Workspace> workspace_;
+    float max_indel_factor_;
 };
 
 } // namespace cudaaligner

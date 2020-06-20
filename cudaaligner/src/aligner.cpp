@@ -11,6 +11,7 @@
 #include <claragenomics/cudaaligner/aligner.hpp>
 
 #include "aligner_global_hirschberg_myers.hpp"
+#include "aligner_global_myers_banded.hpp"
 
 namespace claragenomics
 {
@@ -25,7 +26,8 @@ std::unique_ptr<Aligner> create_aligner(
 {
     if (type == AlignmentType::global_alignment)
     {
-        return std::make_unique<AlignerGlobalHirschbergMyers>(max_query_length, max_target_length, max_alignments, allocator, stream, device_id);
+//        return std::make_unique<AlignerGlobalHirschbergMyers>(max_query_length, max_target_length, max_alignments, allocator, stream, device_id);
+        return std::make_unique<AlignerGlobalMyersBanded>(max_query_length, max_target_length, max_alignments, allocator, stream, device_id);
     }
     else
     {
@@ -59,5 +61,11 @@ std::unique_ptr<Aligner> create_aligner(
 #endif
     return create_aligner(max_query_length, max_target_length, max_alignments, type, allocator, stream, device_id);
 }
+
+int64_t calc_memory_requirement_per_alignment(int32_t max_query_length, int32_t max_target_length)
+{
+    return AlignerGlobalMyersBanded::calc_memory_requirement_per_alignment(max_query_length, max_target_length);
+}
+
 } // namespace cudaaligner
 } // namespace claragenomics
