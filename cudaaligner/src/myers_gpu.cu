@@ -703,7 +703,7 @@ __global__ void myers_banded_kernel(
     int8_t* paths_base,
     int32_t* path_lengths,
     const int32_t max_path_length,
-    const float max_indel_factor,
+    const int32_t max_bandwidth,
     batched_device_matrices<WordType>::device_interface* pvi,
     batched_device_matrices<WordType>::device_interface* mvi,
     batched_device_matrices<int32_t>::device_interface* scorei,
@@ -715,6 +715,7 @@ __global__ void myers_banded_kernel(
     assert(warpSize == warp_size);
     assert(threadIdx.x < warp_size);
     assert(blockIdx.x == 0);
+    assert(max_bandwidth % word_size != 1); // we need at least two bits in the last word
 
     const int32_t alignment_idx = blockIdx.y * blockDim.y + threadIdx.y;
     if (alignment_idx >= n_alignments)
@@ -760,6 +761,10 @@ __global__ void myers_banded_kernel(
             p += 1;
             band_width_new = min(1 + 2 * p + abs(target_size - query_size), query_size);
         }
+        if(band_width_new > max_bandwidth)
+        {
+            band_width_new = max_bandwidth;
+        }
         const int32_t n_words_band = ceiling_divide(band_width_new, word_size);
         if (static_cast<int64_t>(n_words_band) * static_cast<int64_t>(target_size + 1) > pvi->get_max_elements_per_matrix())
         {
@@ -775,7 +780,7 @@ __global__ void myers_banded_kernel(
         myers_compute_scores_edit_dist_banded(diagonal_begin, diagonal_end, pv, mv, score, query_pattern, target, query, target_size, query_size, band_width, n_words_band, p, alignment_idx);
         __syncwarp();
         const int32_t cur_edit_distance = score(n_words_band - 1, target_size);
-        if (cur_edit_distance <= max_distance_estimate || band_width == query_size)
+        if (cur_edit_distance <= max_distance_estimate || band_width == query_size || band_width == max_bandwidth)
         {
             break;
         }
@@ -921,7 +926,7 @@ void myers_banded_gpu(int8_t* paths_d, int32_t* path_lengths_d, int32_t max_path
                       int32_t const* sequence_lengths_d,
                       int32_t max_sequence_length,
                       int32_t n_alignments,
-                      float max_indel_factor,
+                      int32_t max_bandwidth,
                       batched_device_matrices<myers::WordType>& pv,
                       batched_device_matrices<myers::WordType>& mv,
                       batched_device_matrices<int32_t>& score,
@@ -930,7 +935,7 @@ void myers_banded_gpu(int8_t* paths_d, int32_t* path_lengths_d, int32_t max_path
 {
     const dim3 threads(warp_size, 1, 1);
     const dim3 blocks(1, ceiling_divide<int32_t>(n_alignments, threads.y), 1);
-    myers::myers_banded_kernel<<<blocks, threads, 0, stream>>>(paths_d, path_lengths_d, max_path_length, max_indel_factor, pv.get_device_interface(), mv.get_device_interface(), score.get_device_interface(), query_patterns.get_device_interface(), sequences_d, sequence_lengths_d, max_sequence_length, n_alignments);
+    myers::myers_banded_kernel<<<blocks, threads, 0, stream>>>(paths_d, path_lengths_d, max_path_length, max_bandwidth, pv.get_device_interface(), mv.get_device_interface(), score.get_device_interface(), query_patterns.get_device_interface(), sequences_d, sequence_lengths_d, max_sequence_length, n_alignments);
 }
 
 } // namespace cudaaligner

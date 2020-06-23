@@ -23,15 +23,14 @@ namespace cudaaligner
 namespace
 {
 
-constexpr float hardcoded_max_indel_factor = 0.1;
 constexpr int32_t word_size                = sizeof(myers::WordType) * CHAR_BIT;
 
-int64_t compute_matrix_size_per_alignment(int32_t max_target_length, float max_indel_factor)
+int64_t compute_matrix_size_per_alignment(int32_t max_target_length, int32_t max_bandwidth)
 {
-    assert(max_indel_factor <= 1.0);
+    assert(max_bandwidth >= 0);
+    assert(max_target_length >= 0);
     const int32_t query_size            = max_target_length;
-    const int32_t max_distance_estimate = static_cast<int32_t>(std::ceil(max_indel_factor * max_target_length));
-    const int32_t p                     = (max_distance_estimate+1) / 2;
+    const int32_t p                     = (max_bandwidth+1) / 2;
     const int32_t band_width            = std::min(1 + 2 * p, query_size);
     const int64_t n_words_band          = ceiling_divide(band_width, word_size);
     return n_words_band * (static_cast<int64_t>(max_target_length) + 1);
@@ -39,21 +38,18 @@ int64_t compute_matrix_size_per_alignment(int32_t max_target_length, float max_i
 
 } // namespace
 
-int64_t AlignerGlobalMyersBanded::calc_memory_requirement_per_alignment(int32_t max_query_length, int32_t max_target_length, float max_indel_factor)
+int64_t AlignerGlobalMyersBanded::calc_memory_requirement_per_alignment(int32_t max_sequence_length, int32_t max_bandwidth)
 {
     constexpr int32_t alignment_bytes = 4;
+    const int32_t max_query_length = max_sequence_length;
+    const int32_t max_target_length = max_sequence_length;
     const int32_t max_words_query = ceiling_divide(max_query_length, word_size);
-    const int64_t matrix_size_per_alignment = compute_matrix_size_per_alignment(max_target_length, max_indel_factor);
+    const int64_t matrix_size_per_alignment = compute_matrix_size_per_alignment(max_target_length, max_bandwidth);
     const int32_t max_result_length = ceiling_divide(max_query_length + max_target_length, alignment_bytes) * alignment_bytes;
     return 2 * matrix_size_per_alignment * sizeof(myers::WordType) +
         matrix_size_per_alignment * sizeof(int32_t) +
         max_words_query * 4 * sizeof(myers::WordType) +
         2 * max_result_length * sizeof(int8_t);
-}
-
-int64_t AlignerGlobalMyersBanded::calc_memory_requirement_per_alignment(int32_t max_query_length, int32_t max_target_length)
-{
-    return AlignerGlobalMyersBanded::calc_memory_requirement_per_alignment(max_query_length, max_target_length, hardcoded_max_indel_factor);
 }
 
 struct AlignerGlobalMyersBanded::Workspace
@@ -71,14 +67,18 @@ struct AlignerGlobalMyersBanded::Workspace
     batched_device_matrices<myers::WordType> query_patterns;
 };
 
-AlignerGlobalMyersBanded::AlignerGlobalMyersBanded(int32_t max_query_length, int32_t max_target_length, int32_t max_alignments, DefaultDeviceAllocator allocator, cudaStream_t stream, int32_t device_id)
-    : AlignerGlobal(max_query_length, max_target_length, max_alignments, allocator, stream, device_id)
+AlignerGlobalMyersBanded::AlignerGlobalMyersBanded(int32_t max_sequence_length, int32_t max_bandwidth, int32_t max_alignments, DefaultDeviceAllocator allocator, cudaStream_t stream, int32_t device_id)
+    : AlignerGlobal(max_sequence_length, max_sequence_length, max_alignments, allocator, stream, device_id)
     , workspace_()
-    , max_indel_factor_(hardcoded_max_indel_factor)
+    , max_bandwidth_(max_bandwidth)
 {
+    if(max_bandwidth % (sizeof(myers::WordType)*CHAR_BIT) == 1)
+    {
+        throw std::runtime_error("Invalid max_bandwidth value. Please change it by +/-1.");
+    }
     scoped_device_switch dev(device_id);
-    const int32_t max_words_query           = ceiling_divide<int32_t>(max_query_length, word_size);
-    const int64_t matrix_size_per_alignment = compute_matrix_size_per_alignment(max_target_length, max_indel_factor_);
+    const int32_t max_words_query           = ceiling_divide<int32_t>(max_sequence_length, word_size);
+    const int64_t matrix_size_per_alignment = compute_matrix_size_per_alignment(max_sequence_length, max_bandwidth_);
     workspace_ = std::make_unique<Workspace>(max_alignments, max_words_query, matrix_size_per_alignment, allocator, stream);
 }
 
@@ -93,7 +93,7 @@ void AlignerGlobalMyersBanded::run_alignment(int8_t* results_d, int32_t* result_
 {
     static_cast<void>(sequence_lengths_h);
     myers_banded_gpu(results_d, result_lengths_d, max_result_length,
-                     sequences_d, sequence_lengths_d, max_sequence_length, num_alignments, max_indel_factor_,
+                     sequences_d, sequence_lengths_d, max_sequence_length, num_alignments, 0.f,
                      workspace_->pvs, workspace_->mvs, workspace_->scores, workspace_->query_patterns,
                      stream);
 }
