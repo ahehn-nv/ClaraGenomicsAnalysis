@@ -93,7 +93,7 @@ void AlignerGlobalMyersBanded::run_alignment(int8_t* results_d, int32_t* result_
 {
     static_cast<void>(sequence_lengths_h);
     myers_banded_gpu(results_d, result_lengths_d, max_result_length,
-                     sequences_d, sequence_lengths_d, max_sequence_length, num_alignments, 0.f,
+                     sequences_d, sequence_lengths_d, max_sequence_length, num_alignments, max_bandwidth_,
                      workspace_->pvs, workspace_->mvs, workspace_->scores, workspace_->query_patterns,
                      stream);
 }
