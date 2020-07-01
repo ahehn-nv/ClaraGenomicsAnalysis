@@ -782,7 +782,7 @@ __global__ void myers_banded_kernel(
             p = (band_width_new - 1 - abs(target_size - query_size)) / 2;
         }
         const int32_t n_words_band = ceiling_divide(band_width_new, word_size);
-        if (static_cast<int64_t>(n_words_band) * static_cast<int64_t>(target_size + 1) > pvi->get_max_elements_per_matrix())
+        if (static_cast<int64_t>(n_words_band) * static_cast<int64_t>(target_size + 1) > pvi->get_max_elements_per_matrix(alignment_idx))
         {
             band_width = -band_width;
             break;
