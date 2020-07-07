@@ -13,6 +13,7 @@
 
 #include <claragenomics/cudaaligner/aligner.hpp>
 #include <claragenomics/utils/signed_integer_utils.hpp>
+#include <claragenomics/utils/limits.cuh>
 #include <claragenomics/utils/mathutils.hpp>
 #include <claragenomics/utils/cudautils.hpp>
 #include <claragenomics/utils/allocator.hpp>
@@ -196,7 +197,7 @@ __device__ void myers_backtrace(int8_t* paths_base, int32_t* lengths, int32_t ma
 
     const WordType last_entry_mask = query_size % word_size != 0 ? (WordType(1) << (query_size % word_size)) - 1 : ~WordType(0);
 
-    nw_score_t myscore = score((i - 1) / word_size, j);
+    nw_score_t myscore = score((i - 1) / word_size, j); // row 0 is implicit, NW matrix is shifted by i -> i-1 (see get_myers_score)
     int32_t pos        = 0;
     while (i > 0 && j > 0)
     {
@@ -375,6 +376,7 @@ __device__ int32_t myers_backtrace_banded(int8_t* path, device_matrix_view<WordT
 {
     assert(threadIdx.x == 0);
     using nw_score_t = int32_t;
+    constexpr nw_score_t out_of_band = numeric_limits<nw_score_t>::max() - 1;
     assert(pv.num_rows() == score.num_rows());
     assert(mv.num_rows() == score.num_rows());
     assert(pv.num_cols() == score.num_cols());
@@ -385,7 +387,7 @@ __device__ int32_t myers_backtrace_banded(int8_t* path, device_matrix_view<WordT
 
     const WordType last_entry_mask = band_width % word_size != 0 ? (WordType(1) << (band_width % word_size)) - 1 : ~WordType(0);
 
-    nw_score_t myscore = score((i - 1) / word_size, j);
+    nw_score_t myscore = score((i - 1) / word_size, j); // row 0 is implicit, NW matrix is shifted by i -> i-1 (see get_myers_score)
     int32_t pos        = 0;
     while (j >= diagonal_end)
     {
@@ -420,7 +422,7 @@ __device__ int32_t myers_backtrace_banded(int8_t* path, device_matrix_view<WordT
         int8_t r               = 0;
         nw_score_t const above = i <= 1 ? j : get_myers_score(i - 1, j, pv, mv, score, last_entry_mask);
         nw_score_t const diag  = i <= 0 ? j - 1 : get_myers_score(i, j - 1, pv, mv, score, last_entry_mask);
-        nw_score_t const left  = get_myers_score(i + 1, j - 1, pv, mv, score, last_entry_mask);
+        nw_score_t const left  = i >= band_width ? out_of_band : get_myers_score(i + 1, j - 1, pv, mv, score, last_entry_mask);
         if (left + 1 == myscore)
         {
             r       = static_cast<int8_t>(AlignmentState::insertion);
@@ -448,7 +450,7 @@ __device__ int32_t myers_backtrace_banded(int8_t* path, device_matrix_view<WordT
         int8_t r               = 0;
         nw_score_t const above = i == 1 ? j : get_myers_score(i - 1, j, pv, mv, score, last_entry_mask);
         nw_score_t const diag  = i == 1 ? j - 1 : get_myers_score(i - 1, j - 1, pv, mv, score, last_entry_mask);
-        nw_score_t const left  = get_myers_score(i, j - 1, pv, mv, score, last_entry_mask);
+        nw_score_t const left  = i > band_width ? out_of_band : get_myers_score(i, j - 1, pv, mv, score, last_entry_mask);
         if (left + 1 == myscore)
         {
             r       = static_cast<int8_t>(AlignmentState::insertion);
@@ -690,8 +692,9 @@ myers_compute_scores_edit_dist_banded(
     }
     else
     {
-        diagonal_begin = query_size < target_size ? target_size - query_size + p + 2 : p + 2;
-        diagonal_end   = query_size < target_size ? query_size - p + 1 : query_size - (query_size - target_size) - p + 1;
+        const int32_t symmetric_band = (band_width - min(1 + 2 * p + abs(target_size - query_size), query_size) == 0) ? 1 : 0;
+        diagonal_begin = query_size < target_size ? target_size - query_size + p + 2 : p + 2 + (1 - symmetric_band);
+        diagonal_end   = query_size < target_size ? query_size - p + symmetric_band: query_size - (query_size - target_size) - p + 1;
 
         myers_compute_scores_horizontal_band_impl(pv, mv, score, query_patterns, target_begin, query_begin, target_size, 1, diagonal_begin, band_width, n_words_band, 0);
         myers_compute_scores_diagonal_band_impl(pv, mv, score, query_patterns, target_begin, query_begin, target_size, diagonal_begin, diagonal_end, band_width, n_words_band, 0);
@@ -764,6 +767,7 @@ __global__ void myers_banded_kernel(
         if(band_width_new > max_bandwidth)
         {
             band_width_new = max_bandwidth;
+            p = (band_width_new - 1 - abs(target_size - query_size)) / 2;
         }
         const int32_t n_words_band = ceiling_divide(band_width_new, word_size);
         if (static_cast<int64_t>(n_words_band) * static_cast<int64_t>(target_size + 1) > pvi->get_max_elements_per_matrix())
