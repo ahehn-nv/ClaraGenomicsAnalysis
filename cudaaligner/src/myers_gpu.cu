@@ -632,6 +632,10 @@ myers_compute_scores_edit_dist_banded(
 
     assert(target_size > 0);
     assert(query_size > 0);
+    assert(band_width > 0);
+    assert(n_words_band > 0);
+    assert(p >= 0);
+    assert(alignment_idx >= 0);
 
     assert(pv.num_rows() == n_words_band);
     assert(mv.num_rows() == n_words_band);
@@ -729,6 +733,14 @@ __global__ void myers_banded_kernel(
     const char* const target  = sequences_d + (2 * alignment_idx + 1) * max_sequence_length;
     const int32_t n_words     = (query_size + word_size - 1) / word_size;
     int8_t* path              = paths_base + alignment_idx * static_cast<ptrdiff_t>(max_path_length);
+    if(max_bandwidth - 1 < abs(target_size - query_size))
+    {
+        if(threadIdx.x == 0)
+        {
+            path_lengths[alignment_idx] = 0;
+        }
+        return;
+    }
 
     device_matrix_view<WordType> query_pattern = query_patternsi->get_matrix_view(alignment_idx, n_words, 4);
 
