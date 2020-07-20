@@ -35,7 +35,6 @@ constexpr int32_t warp_size = 32;
 namespace myers
 {
 
-constexpr int32_t word_size                     = sizeof(WordType) * CHAR_BIT;
 constexpr int32_t initial_distance_guess_factor = 20;
 
 inline __device__ WordType warp_leftshift_sync(uint32_t warp_mask, WordType v)
@@ -44,18 +43,20 @@ inline __device__ WordType warp_leftshift_sync(uint32_t warp_mask, WordType v)
     // 4 threads, word_size = 4 example: thread 0  | thread 1 | thread 2 | thread 3
     // v = 0101 | 0111 | 0011 | 1101 -> 1010 | 1110 | 0111 | 1010
     const WordType x = __shfl_up_sync(warp_mask, v >> (word_size - 1), 1);
+    assert((x & ~WordType(1)) == 0);
     v <<= 1;
     if (threadIdx.x != 0)
         v |= x;
     return v;
 }
 
-inline __device__ WordType warp_rightshift_sync(int32_t t, int32_t i, uint32_t warp_mask, WordType v)
+inline __device__ WordType warp_rightshift_sync(uint32_t warp_mask, WordType v)
 {
     assert(((warp_mask >> (threadIdx.x % warp_size)) & 1u) == 1u);
     // 4 threads, word_size = 4 example: thread 0  | thread 1 | thread 2 | thread 3
     // v = 0101 | 0111 | 0011 | 1101 -> 0010 | 1011 | 1001 | 1110
     const WordType x = __shfl_down_sync(warp_mask, v << (word_size - 1), 1);
+    assert((x & ~(WordType(1) << (word_size - 1))) == 0);
     v >>= 1;
     if ((warp_mask >> threadIdx.x) > 1u)
         v |= x;
@@ -104,6 +105,39 @@ __device__ int32_t myers_advance_block(uint32_t warp_mask, WordType highest_bit,
     WordType mh = pv & xh;
 
     int32_t carry_out = ((ph & highest_bit) == WordType(0) ? 0 : 1) - ((mh & highest_bit) == WordType(0) ? 0 : 1);
+
+    ph = warp_leftshift_sync(warp_mask, ph);
+    mh = warp_leftshift_sync(warp_mask, mh);
+
+    if (carry_in < 0)
+        mh |= WordType(1);
+
+    if (carry_in > 0)
+        ph |= WordType(1);
+
+    // Stage 2
+    pv = mh | (~(xv | ph));
+    mv = ph & xv;
+
+    return carry_out;
+}
+
+__device__ int2 myers_advance_block2(uint32_t warp_mask, WordType highest_bit, WordType eq, WordType& pv, WordType& mv, int32_t carry_in)
+{
+    assert((pv & mv) == WordType(0));
+
+    // Stage 1
+    WordType xv = eq | mv;
+    if (carry_in < 0)
+        eq |= WordType(1);
+    WordType xh = warp_add_sync(warp_mask, eq & pv, pv);
+    xh          = (xh ^ pv) | eq;
+    WordType ph = mv | (~(xh | pv));
+    WordType mh = pv & xh;
+
+    int2 carry_out;
+    carry_out.x = ((ph & highest_bit) == WordType(0) ? 0 : 1) - ((mh & highest_bit) == WordType(0) ? 0 : 1);
+    carry_out.y = ((ph & (highest_bit << 1)) == WordType(0) ? 0 : 1) - ((mh & (highest_bit << 1)) == WordType(0) ? 0 : 1);
 
     ph = warp_leftshift_sync(warp_mask, ph);
     mh = warp_leftshift_sync(warp_mask, mh);
@@ -556,10 +590,9 @@ __device__ void myers_compute_scores_diagonal_band_impl(
     const int32_t n_warp_iterations = ceiling_divide(n_words_band, warp_size) * warp_size;
     for (int32_t t = t_begin; t < t_end; ++t)
     {
-        int32_t itcnt      = 0;
-        int32_t carry_down = 0;
+        int32_t carry = 0;
         if (threadIdx.x == 0)
-            carry_down = 1; // worst case for the top boarder of the band
+            carry = 1; // worst case for the top boarder of the band
         for (int32_t idx = threadIdx.x; idx < n_warp_iterations; idx += warp_size)
         {
             // idx within band column
@@ -568,8 +601,8 @@ __device__ void myers_compute_scores_diagonal_band_impl(
             if (idx < n_words_band)
             {
                 // data from the previous column
-                WordType pv_local = warp_rightshift_sync(t, ++itcnt, warp_mask, pv(idx, t - 1));
-                WordType mv_local = warp_rightshift_sync(t, ++itcnt, warp_mask, mv(idx, t - 1));
+                WordType pv_local = warp_rightshift_sync(warp_mask, pv(idx, t - 1));
+                WordType mv_local = warp_rightshift_sync(warp_mask, mv(idx, t - 1));
                 if (threadIdx.x == 31 && warp_mask == 0xffff'ffffu)
                 {
                     if (idx < n_words_band - 1)
@@ -579,11 +612,11 @@ __device__ void myers_compute_scores_diagonal_band_impl(
                     }
                 }
 
+                const WordType eq = get_query_pattern(query_patterns, idx, pattern_idx_offset + t - t_begin + 1, target_begin[t - 1], false);
+
                 const WordType carry_right_bit = WordType(1) << (idx == (n_words_band - 1) ? band_width - (n_words_band - 1) * word_size - 2 : word_size - 2);
                 const WordType carry_down_bit  = carry_right_bit << 1;
                 assert(carry_down_bit != 0);
-
-                const WordType eq = get_query_pattern(query_patterns, idx, pattern_idx_offset + t - t_begin + 1, target_begin[t - 1], false);
                 if (idx == n_words_band - 1)
                 {
                     // bits who have no left neighbor -> assume worst case: +1
@@ -591,15 +624,15 @@ __device__ void myers_compute_scores_diagonal_band_impl(
                     mv_local &= ~carry_down_bit;
                 }
 
-                const int32_t carry_right = myers_advance_block(warp_mask, carry_right_bit, eq, pv_local, mv_local, carry_down);
-                carry_down                = ((pv_local & carry_down_bit) == WordType(0) ? 0 : 1) - ((mv_local & carry_down_bit) == WordType(0) ? 0 : 1);
-                score(idx, t)             = score(idx, t - 1) + carry_right + carry_down;
+                const int2 carry_right   = myers_advance_block2(warp_mask, carry_right_bit, eq, pv_local, mv_local, carry);
+                const int32_t carry_down = ((pv_local & carry_down_bit) == WordType(0) ? 0 : 1) - ((mv_local & carry_down_bit) == WordType(0) ? 0 : 1);
+                score(idx, t)            = score(idx, t - 1) + carry_right.x + carry_down;
                 if (threadIdx.x == 0)
-                    carry_down = 0;
+                    carry = 0;
                 if (warp_mask == 0xffff'ffffu && (threadIdx.x == 0 || threadIdx.x == 31))
-                    carry_down = __shfl_down_sync(0x8000'0001u, carry_down, warp_size - 1);
+                    carry = __shfl_down_sync(0x8000'0001u, carry_right.y, warp_size - 1);
                 if (threadIdx.x != 0)
-                    carry_down = 0;
+                    carry = 0;
                 pv(idx, t) = pv_local;
                 mv(idx, t) = mv_local;
             }
@@ -815,6 +848,90 @@ __global__ void myers_banded_kernel(
 }
 
 } // namespace myers
+
+namespace detail
+{
+namespace test
+{
+__global__ void
+myers_compute_scores_edit_dist_banded_test_kernel(
+    batched_device_matrices<myers::WordType>::device_interface* pvi,
+    batched_device_matrices<myers::WordType>::device_interface* mvi,
+    batched_device_matrices<int32_t>::device_interface* scorei,
+    batched_device_matrices<myers::WordType>::device_interface* query_patternsi,
+    char const* target,
+    char const* query,
+    int32_t const target_size,
+    int32_t const query_size,
+    int32_t const band_width,
+    int32_t const p)
+{
+    using myers::word_size;
+    using myers::WordType;
+    constexpr int32_t warp_size = 32;
+    const int32_t alignment_idx = 0;
+    const int32_t n_words       = ceiling_divide(query_size, word_size);
+
+    device_matrix_view<WordType> query_pattern = query_patternsi->get_matrix_view(alignment_idx, n_words, 4);
+    for (int32_t idx = threadIdx.x; idx < n_words; idx += warp_size)
+    {
+        // TODO query load is inefficient
+        query_pattern(idx, 0) = myers::myers_generate_query_pattern('A', query, query_size, idx * word_size);
+        query_pattern(idx, 1) = myers::myers_generate_query_pattern('C', query, query_size, idx * word_size);
+        query_pattern(idx, 2) = myers::myers_generate_query_pattern('T', query, query_size, idx * word_size);
+        query_pattern(idx, 3) = myers::myers_generate_query_pattern('G', query, query_size, idx * word_size);
+    }
+    __syncwarp();
+
+    const int32_t n_words_band = ceiling_divide(band_width, word_size);
+
+    device_matrix_view<WordType> pv   = pvi->get_matrix_view(alignment_idx, n_words_band, target_size + 1);
+    device_matrix_view<WordType> mv   = mvi->get_matrix_view(alignment_idx, n_words_band, target_size + 1);
+    device_matrix_view<int32_t> score = scorei->get_matrix_view(alignment_idx, n_words_band, target_size + 1);
+
+    if (band_width - (n_words_band - 1) * word_size < 2)
+    {
+        // invalid band_width: we need at least two bits in the last word
+        // set everything to zero and return.
+        for (int32_t t = 0; t < target_size + 1; ++t)
+        {
+            for (int32_t idx = threadIdx.x; idx < n_words_band; idx += warp_size)
+            {
+                pv(idx, t)    = 0;
+                mv(idx, t)    = 0;
+                score(idx, t) = 0;
+            }
+            __syncwarp();
+        }
+        return;
+    }
+
+    int32_t diagonal_begin = -1;
+    int32_t diagonal_end   = -1;
+    myers::myers_compute_scores_edit_dist_banded(diagonal_begin, diagonal_end, pv, mv, score, query_pattern, target, query, target_size, query_size, band_width, n_words_band, p, alignment_idx);
+}
+
+void myers_compute_scores_edit_dist_banded_test_function(
+    batched_device_matrices<myers::WordType>& pv,
+    batched_device_matrices<myers::WordType>& mv,
+    batched_device_matrices<int32_t>& score,
+    batched_device_matrices<myers::WordType>& query_patterns,
+    char const* target,
+    char const* query,
+    int32_t const target_size,
+    int32_t const query_size,
+    int32_t const band_width,
+    int32_t const p,
+    cudaStream_t stream)
+{
+    myers_compute_scores_edit_dist_banded_test_kernel<<<1, 32, 0, stream>>>(
+        pv.get_device_interface(), mv.get_device_interface(),
+        score.get_device_interface(), query_patterns.get_device_interface(),
+        target, query, target_size, query_size, band_width, p);
+}
+
+} // namespace test
+} // namespace detail
 
 int32_t myers_compute_edit_distance(std::string const& target, std::string const& query)
 {
