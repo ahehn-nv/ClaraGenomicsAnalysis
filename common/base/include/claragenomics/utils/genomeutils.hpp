@@ -13,6 +13,7 @@
 #include <random>
 #include <stdexcept>
 #include <claragenomics/utils/signed_integer_utils.hpp>
+#include <algorithm>
 
 namespace claragenomics
 {
@@ -137,6 +138,18 @@ inline void reverse_complement(const char* src, const int32_t length, char* dest
         case 'G': dest[pos] = 'C'; break;
         default: dest[pos] = nucleotide;
         }
+    }
+}
+
+inline void copy_sequence(const char* const src, const int32_t length, char* const dest, const bool do_reverse_complement)
+{
+    if (do_reverse_complement)
+    {
+        genomeutils::reverse_complement(src, length, dest);
+    }
+    else
+    {
+        std::copy_n(src, length, dest);
     }
 }
 
