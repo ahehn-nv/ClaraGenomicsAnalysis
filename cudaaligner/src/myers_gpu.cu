@@ -813,6 +813,90 @@ __global__ void myers_banded_kernel(
 
 } // namespace myers
 
+namespace detail
+{
+namespace test
+{
+__global__ void
+myers_compute_scores_edit_dist_banded_test_kernel(
+    batched_device_matrices<myers::WordType>::device_interface* pvi,
+    batched_device_matrices<myers::WordType>::device_interface* mvi,
+    batched_device_matrices<int32_t>::device_interface* scorei,
+    batched_device_matrices<myers::WordType>::device_interface* query_patternsi,
+    char const* target,
+    char const* query,
+    int32_t const target_size,
+    int32_t const query_size,
+    int32_t const band_width,
+    int32_t const p)
+{
+    using myers::word_size;
+    using myers::WordType;
+    constexpr int32_t warp_size = 32;
+    const int32_t alignment_idx = 0;
+    const int32_t n_words       = ceiling_divide(query_size, word_size);
+
+    device_matrix_view<WordType> query_pattern = query_patternsi->get_matrix_view(alignment_idx, n_words, 4);
+    for (int32_t idx = threadIdx.x; idx < n_words; idx += warp_size)
+    {
+        // TODO query load is inefficient
+        query_pattern(idx, 0) = myers::myers_generate_query_pattern('A', query, query_size, idx * word_size);
+        query_pattern(idx, 1) = myers::myers_generate_query_pattern('C', query, query_size, idx * word_size);
+        query_pattern(idx, 2) = myers::myers_generate_query_pattern('T', query, query_size, idx * word_size);
+        query_pattern(idx, 3) = myers::myers_generate_query_pattern('G', query, query_size, idx * word_size);
+    }
+    __syncwarp();
+
+    const int32_t n_words_band = ceiling_divide(band_width, word_size);
+
+    device_matrix_view<WordType> pv   = pvi->get_matrix_view(alignment_idx, n_words_band, target_size + 1);
+    device_matrix_view<WordType> mv   = mvi->get_matrix_view(alignment_idx, n_words_band, target_size + 1);
+    device_matrix_view<int32_t> score = scorei->get_matrix_view(alignment_idx, n_words_band, target_size + 1);
+
+    if (band_width - (n_words_band - 1) * word_size < 2)
+    {
+        // invalid band_width: we need at least two bits in the last word
+        // set everything to zero and return.
+        for (int32_t t = 0; t < target_size + 1; ++t)
+        {
+            for (int32_t idx = threadIdx.x; idx < n_words_band; idx += warp_size)
+            {
+                pv(idx, t)    = 0;
+                mv(idx, t)    = 0;
+                score(idx, t) = 0;
+            }
+            __syncwarp();
+        }
+        return;
+    }
+
+    int32_t diagonal_begin = -1;
+    int32_t diagonal_end   = -1;
+    myers::myers_compute_scores_edit_dist_banded(diagonal_begin, diagonal_end, pv, mv, score, query_pattern, target, query, target_size, query_size, band_width, n_words_band, p, alignment_idx);
+}
+
+void myers_compute_scores_edit_dist_banded_test_function(
+    batched_device_matrices<myers::WordType>& pv,
+    batched_device_matrices<myers::WordType>& mv,
+    batched_device_matrices<int32_t>& score,
+    batched_device_matrices<myers::WordType>& query_patterns,
+    char const* target,
+    char const* query,
+    int32_t const target_size,
+    int32_t const query_size,
+    int32_t const band_width,
+    int32_t const p,
+    cudaStream_t stream)
+{
+    myers_compute_scores_edit_dist_banded_test_kernel<<<1, 32, 0, stream>>>(
+        pv.get_device_interface(), mv.get_device_interface(),
+        score.get_device_interface(), query_patterns.get_device_interface(),
+        target, query, target_size, query_size, band_width, p);
+}
+
+} // namespace test
+} // namespace detail
+
 int32_t myers_compute_edit_distance(std::string const& target, std::string const& query)
 {
     constexpr int32_t warp_size = 32;

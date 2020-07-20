@@ -12,7 +12,7 @@
 #include <claragenomics/utils/cudautils.hpp>
 #include <claragenomics/utils/signed_integer_utils.hpp>
 #include <claragenomics/utils/mathutils.hpp>
-#include "../src/myers_gpu.cu"
+#include "../src/myers_gpu.cuh"
 #include "../src/needleman_wunsch_cpu.hpp"
 #include "cudaaligner_test_cases.hpp"
 
@@ -25,70 +25,6 @@ namespace claragenomics
 
 namespace cudaaligner
 {
-
-namespace test
-{
-
-__global__ void
-myers_compute_scores_edit_dist_banded_test_kernel(
-    batched_device_matrices<myers::WordType>::device_interface* pvi,
-    batched_device_matrices<myers::WordType>::device_interface* mvi,
-    batched_device_matrices<int32_t>::device_interface* scorei,
-    batched_device_matrices<myers::WordType>::device_interface* query_patternsi,
-    char const* target,
-    char const* query,
-    int32_t const target_size,
-    int32_t const query_size,
-    int32_t const band_width,
-    int32_t const p)
-{
-    using myers::word_size;
-    using myers::WordType;
-    constexpr int32_t warp_size = 32;
-    const int32_t alignment_idx = 0;
-    const int32_t n_words       = ceiling_divide(query_size, word_size);
-
-    device_matrix_view<WordType> query_pattern = query_patternsi->get_matrix_view(alignment_idx, n_words, 4);
-    for (int32_t idx = threadIdx.x; idx < n_words; idx += warp_size)
-    {
-        // TODO query load is inefficient
-        query_pattern(idx, 0) = myers::myers_generate_query_pattern('A', query, query_size, idx * word_size);
-        query_pattern(idx, 1) = myers::myers_generate_query_pattern('C', query, query_size, idx * word_size);
-        query_pattern(idx, 2) = myers::myers_generate_query_pattern('T', query, query_size, idx * word_size);
-        query_pattern(idx, 3) = myers::myers_generate_query_pattern('G', query, query_size, idx * word_size);
-    }
-    __syncwarp();
-
-    const int32_t n_words_band = ceiling_divide(band_width, word_size);
-
-    device_matrix_view<WordType> pv   = pvi->get_matrix_view(alignment_idx, n_words_band, target_size + 1);
-    device_matrix_view<WordType> mv   = mvi->get_matrix_view(alignment_idx, n_words_band, target_size + 1);
-    device_matrix_view<int32_t> score = scorei->get_matrix_view(alignment_idx, n_words_band, target_size + 1);
-
-    if (band_width - (n_words_band - 1) * word_size < 2)
-    {
-        // invalid band_width: we need at least two bits in the last word
-        // set everything to zero and return.
-        for (int32_t t = 0; t < target_size + 1; ++t)
-        {
-            for (int32_t idx = threadIdx.x; idx < n_words_band; idx += warp_size)
-            {
-                pv(idx, t)    = 0;
-                mv(idx, t)    = 0;
-                score(idx, t) = 0;
-            }
-            __syncwarp();
-        }
-        return;
-    }
-
-    int32_t diagonal_begin = -1;
-    int32_t diagonal_end   = -1;
-    myers::myers_compute_scores_edit_dist_banded(diagonal_begin, diagonal_end, pv, mv, score, query_pattern, target, query, target_size, query_size, band_width, n_words_band, p, alignment_idx);
-}
-
-} // namespace test
-
 namespace
 {
 
@@ -199,11 +135,11 @@ TEST_P(TestMyersBandedMatrixDeltas, TestCases)
         const int32_t max_distance_estimate = std::max(target_size, query_size) / 4;
 
         int32_t p          = min3(target_size, query_size, (max_distance_estimate - abs(target_size - query_size)) / 2);
-        int32_t band_width = min(1 + 2 * p + abs(target_size - query_size), query_size);
+        int32_t band_width = std::min(1 + 2 * p + abs(target_size - query_size), query_size);
         if (band_width % word_size == 1 && band_width != query_size) // we need at least two bits in the last word
         {
             p += 1;
-            band_width = min(1 + 2 * p + abs(target_size - query_size), query_size);
+            band_width = std::min(1 + 2 * p + abs(target_size - query_size), query_size);
         }
         const int32_t n_words      = ceiling_divide(query_size, word_size);
         const int32_t n_words_band = ceiling_divide(band_width, word_size);
@@ -213,10 +149,9 @@ TEST_P(TestMyersBandedMatrixDeltas, TestCases)
         batched_device_matrices<int32_t> scores(1, n_words_band * (target_size + 1), allocator, stream);
         batched_device_matrices<myers::WordType> query_patterns(1, n_words * 4, allocator, stream);
 
-        test::myers_compute_scores_edit_dist_banded_test_kernel<<<1, 32, 0, stream>>>(
-            pvs.get_device_interface(), mvs.get_device_interface(),
-            scores.get_device_interface(), query_patterns.get_device_interface(),
-            target_d.data(), query_d.data(), target_size, query_size, band_width, p);
+        detail::test::myers_compute_scores_edit_dist_banded_test_function(
+            pvs, mvs, scores, query_patterns,
+            target_d.data(), query_d.data(), target_size, query_size, band_width, p, stream);
 
         const int32_t n_rows             = n_words_band;
         const int32_t n_cols             = target_size + 1;
