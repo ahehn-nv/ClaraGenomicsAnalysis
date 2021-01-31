@@ -17,6 +17,7 @@
 #include "aligner_global_myers_banded.hpp"
 #include "myers_gpu.cuh"
 #include "batched_device_matrices.cuh"
+#include "convert_to_cigar.cuh"
 #include "alignment_impl.hpp"
 
 #include <claraparabricks/genomeworks/utils/signed_integer_utils.hpp>
@@ -101,8 +102,8 @@ struct AlignerGlobalMyersBanded::InternalData
         , seq_d(2 * mem.sequence_memory / sizeof(char), allocator, stream)
         , seq_starts_d(2 * n_alignments_initial + 1, allocator, stream)
         , results_d(mem.results_memory / sizeof(char), allocator, stream)
-        , result_starts_d(n_alignments_initial + 1, allocator, stream)
         , result_lengths_d(n_alignments_initial, allocator, stream)
+        , result_starts_d(n_alignments_initial + 1, allocator, stream)
         , pvs(mem.pmvs_matrix_memory / sizeof(WordType), allocator, stream)
         , mvs(mem.pmvs_matrix_memory / sizeof(WordType), allocator, stream)
         , scores(mem.score_matrix_memory / sizeof(int32_t), allocator, stream)
@@ -121,8 +122,8 @@ struct AlignerGlobalMyersBanded::InternalData
     device_buffer<char> seq_d;
     device_buffer<int64_t> seq_starts_d;
     device_buffer<int8_t> results_d;
-    device_buffer<int64_t> result_starts_d;
     device_buffer<int32_t> result_lengths_d;
+    device_buffer<int64_t> result_starts_d;
     batched_device_matrices<WordType> pvs;
     batched_device_matrices<WordType> mvs;
     batched_device_matrices<int32_t> scores;
@@ -252,9 +253,9 @@ StatusType AlignerGlobalMyersBanded::align_all()
     data_->scores.construct_device_matrices_async(stream_);
     data_->query_patterns.construct_device_matrices_async(stream_);
 
-    const auto& seq_h           = data_->seq_h;
-    const auto& seq_starts_h    = data_->seq_starts_h;
-    auto& results_h             = data_->results_h;
+    const auto& seq_h        = data_->seq_h;
+    const auto& seq_starts_h = data_->seq_starts_h;
+    //    auto& results_h             = data_->results_h;
     auto& result_lengths_h      = data_->result_lengths_h;
     const auto& result_starts_h = data_->result_starts_h;
 
@@ -290,7 +291,7 @@ StatusType AlignerGlobalMyersBanded::align_all()
     result_lengths_h.clear();
     result_lengths_h.resize(n_alignments);
 
-    device_copy_n_async(results_d.data(), result_starts_h.back(), results_h.data(), stream_);
+    //    device_copy_n_async(results_d.data(), result_starts_h.back(), results_h.data(), stream_);
     device_copy_n_async(result_lengths_d.data(), n_alignments, result_lengths_h.data(), stream_);
 
     return StatusType::success;
@@ -300,24 +301,24 @@ StatusType AlignerGlobalMyersBanded::sync_alignments()
 {
     scoped_device_switch dev(device_id_);
     GW_CU_CHECK_ERR(cudaStreamSynchronize(stream_));
+    convert_to_cigar_gpu(alignments_, data_->results_d.data(), data_->result_lengths_h.data(), data_->result_starts_h.data(), data_->results_d.get_allocator(), stream_);
 
-    const int32_t n_alignments = get_size<int32_t>(alignments_);
-    std::vector<AlignmentState> al_state;
-    for (int32_t i = 0; i < n_alignments; ++i)
-    {
-        al_state.clear();
-        const int8_t* r_begin = data_->results_h.data() + data_->result_starts_h[i];
-        const int8_t* r_end   = r_begin + std::abs(data_->result_lengths_h[i]);
-        std::transform(r_begin, r_end, std::back_inserter(al_state), [](int8_t x) { return static_cast<AlignmentState>(x); });
-        std::reverse(begin(al_state), end(al_state));
-        if (!al_state.empty() || (alignments_[i]->get_query_sequence().empty() && alignments_[i]->get_target_sequence().empty()))
-        {
-            AlignmentImpl* alignment = dynamic_cast<AlignmentImpl*>(alignments_[i].get());
-            const bool is_optimal    = (data_->result_lengths_h[i] >= 0);
-            alignment->set_alignment(al_state, is_optimal);
-            alignment->set_status(StatusType::success);
-        }
-    }
+    //    std::vector<AlignmentState> al_state;
+    //    for (int32_t i = 0; i < n_alignments; ++i)
+    //    {
+    //        al_state.clear();
+    //        const int8_t* r_begin = data_->results_h.data() + data_->result_starts_h[i];
+    //        const int8_t* r_end   = r_begin + std::abs(data_->result_lengths_h[i]);
+    //        std::transform(r_begin, r_end, std::back_inserter(al_state), [](int8_t x) { return static_cast<AlignmentState>(x); });
+    //        std::reverse(begin(al_state), end(al_state));
+    //        if (!al_state.empty() || (alignments_[i]->get_query_sequence().empty() && alignments_[i]->get_target_sequence().empty()))
+    //        {
+    //            AlignmentImpl* alignment = dynamic_cast<AlignmentImpl*>(alignments_[i].get());
+    //            const bool is_optimal    = (data_->result_lengths_h[i] >= 0);
+    //            alignment->set_alignment(al_state, is_optimal);
+    //            alignment->set_status(StatusType::success);
+    //        }
+    //    }
     reset_data();
     return StatusType::success;
 }

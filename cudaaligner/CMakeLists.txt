@@ -42,6 +42,7 @@ cuda_add_library(${MODULE_NAME} ${gw_library_type}
     src/ukkonen_gpu.cu
     src/myers_gpu.cu
     src/hirschberg_myers_gpu.cu
+    src/convert_to_cigar.cu
     )
 
 add_library(${MODULE_NAME}_internal INTERFACE)
