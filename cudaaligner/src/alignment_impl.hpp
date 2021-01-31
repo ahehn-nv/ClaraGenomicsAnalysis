@@ -49,6 +49,12 @@ public:
     /// \return CIGAR string
     std::string convert_to_cigar(CigarFormat format) const override;
 
+    virtual void set_cigar(const char* cigar, int32_t length, bool is_optimal)
+    {
+        cigar_      = std::string(cigar, length);
+        is_optimal_ = is_optimal;
+    }
+
     /// \brief Set alignment type.
     /// \param type Alignment type.
     virtual void set_alignment_type(AlignmentType type)
@@ -123,6 +129,7 @@ private:
     StatusType status_;
     AlignmentType type_;
     std::vector<AlignmentState> alignment_;
+    std::string cigar_;
     bool is_optimal_;
 };
 } // namespace cudaaligner

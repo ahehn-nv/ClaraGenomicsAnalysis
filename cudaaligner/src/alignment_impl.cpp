@@ -105,6 +105,8 @@ AlignmentImpl::AlignmentImpl(const char* const query, const int32_t query_length
 
 std::string AlignmentImpl::convert_to_cigar(const CigarFormat format) const
 {
+    if (!cigar_.empty())
+        return cigar_;
     if (format == CigarFormat::extended)
         return convert_to_cigar_impl(alignment_, alignment_state_to_cigar_state_extended);
     else

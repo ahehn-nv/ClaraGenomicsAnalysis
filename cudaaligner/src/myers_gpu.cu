@@ -414,7 +414,7 @@ __global__ void myers_compute_score_matrix_kernel(
     }
 }
 
-__device__ int32_t myers_backtrace_banded(int8_t* path, device_matrix_view<WordType> const& pv, device_matrix_view<WordType> const& mv, device_matrix_view<int32_t> const& score, int32_t diagonal_begin, int32_t diagonal_end, int32_t band_width, int32_t target_size, int32_t query_size)
+__device__ int32_t myers_backtrace_banded(char* const path, int32_t* const path_count, device_matrix_view<WordType> const& pv, device_matrix_view<WordType> const& mv, device_matrix_view<int32_t> const& score, const int32_t diagonal_begin, const int32_t diagonal_end, const int32_t band_width, const int32_t target_size, const int32_t query_size)
 {
     assert(threadIdx.x == 0);
     using nw_score_t                    = int32_t;
@@ -436,107 +436,166 @@ __device__ int32_t myers_backtrace_banded(int8_t* path, device_matrix_view<WordT
     const nw_score_t last_diagonal_score = diagonal_end < 2 ? out_of_band : get_myers_score(1, diagonal_end - 2, pv, mv, score, last_entry_mask) + 2;
     nw_score_t myscore                   = score((i - 1) / word_size, j); // row 0 is implicit, NW matrix is shifted by i -> i-1, i.e. i \in [1,band_width] for get_myers_score. (see get_myers_score)
     int32_t pos                          = 0;
+    char prev_r                          = 0;
+    int32_t r_count                      = 0;
     while (j >= diagonal_end)
     {
-        int8_t r = 0;
+        char r = 0;
         // Worst case for the implicit top row (i == 0) of the bottom right block of the NW is the last diagonal entry on the same row + (j - diagonal_end) * indel cost.
         nw_score_t const above = i <= 1 ? (last_diagonal_score + j - diagonal_end) : get_myers_score(i - 1, j, pv, mv, score, last_entry_mask);
         nw_score_t const diag  = i <= 1 ? (last_diagonal_score + j - 1 - diagonal_end) : get_myers_score(i - 1, j - 1, pv, mv, score, last_entry_mask);
         nw_score_t const left  = i < 1 ? (last_diagonal_score + j - 1 - diagonal_end) : get_myers_score(i, j - 1, pv, mv, score, last_entry_mask);
         if (left + 1 == myscore)
         {
-            r       = static_cast<int8_t>(AlignmentState::insertion);
+            r       = 'I';
             myscore = left;
             --j;
         }
         else if (above + 1 == myscore)
         {
-            r       = static_cast<int8_t>(AlignmentState::deletion);
+            r       = 'D';
             myscore = above;
             --i;
         }
         else
         {
             assert(diag == myscore || diag + 1 == myscore);
-            r       = (diag == myscore ? static_cast<int8_t>(AlignmentState::match) : static_cast<int8_t>(AlignmentState::mismatch));
+            r       = (diag == myscore ? '=' : 'X');
             myscore = diag;
             --i;
             --j;
         }
-        path[pos] = r;
-        ++pos;
+        if (prev_r != r)
+        {
+            if (prev_r != 0)
+            {
+                path[pos]       = prev_r;
+                path_count[pos] = r_count;
+                ++pos;
+            }
+            prev_r  = r;
+            r_count = 0;
+        }
+        ++r_count;
     }
     while (j >= diagonal_begin)
     {
-        int8_t r               = 0;
+        char r                 = 0;
         nw_score_t const above = i <= 1 ? out_of_band : get_myers_score(i - 1, j, pv, mv, score, last_entry_mask);
         nw_score_t const diag  = i <= 0 ? j - 1 : get_myers_score(i, j - 1, pv, mv, score, last_entry_mask);
         nw_score_t const left  = i >= band_width ? out_of_band : get_myers_score(i + 1, j - 1, pv, mv, score, last_entry_mask);
         // out-of-band cases: diag always preferrable, since worst-case-(above|left) - myscore >= diag - myscore always holds.
         if (left + 1 == myscore)
         {
-            r       = static_cast<int8_t>(AlignmentState::insertion);
+            r       = 'I';
             myscore = left;
             ++i;
             --j;
         }
         else if (above + 1 == myscore)
         {
-            r       = static_cast<int8_t>(AlignmentState::deletion);
+            r       = 'D';
             myscore = above;
             --i;
         }
         else
         {
             assert(diag == myscore || diag + 1 == myscore);
-            r       = (diag == myscore ? static_cast<int8_t>(AlignmentState::match) : static_cast<int8_t>(AlignmentState::mismatch));
+            r       = (diag == myscore ? '=' : 'X');
             myscore = diag;
             --j;
         }
-        path[pos] = r;
-        ++pos;
+        if (prev_r != r)
+        {
+            if (prev_r != 0)
+            {
+                path[pos]       = prev_r;
+                path_count[pos] = r_count;
+                ++pos;
+            }
+            prev_r  = r;
+            r_count = 0;
+        }
+        ++r_count;
     }
     while (i > 0 && j > 0)
     {
-        int8_t r               = 0;
+        char r                 = 0;
         nw_score_t const above = i == 1 ? j : get_myers_score(i - 1, j, pv, mv, score, last_entry_mask);
         nw_score_t const diag  = i == 1 ? j - 1 : get_myers_score(i - 1, j - 1, pv, mv, score, last_entry_mask);
         nw_score_t const left  = i > band_width ? out_of_band : get_myers_score(i, j - 1, pv, mv, score, last_entry_mask);
         // out-of-band cases: diag always preferrable, since worst-case-(above|left) - myscore >= diag - myscore always holds.
         if (left + 1 == myscore)
         {
-            r       = static_cast<int8_t>(AlignmentState::insertion);
+            r       = 'I';
             myscore = left;
             --j;
         }
         else if (above + 1 == myscore)
         {
-            r       = static_cast<int8_t>(AlignmentState::deletion);
+            r       = 'D';
             myscore = above;
             --i;
         }
         else
         {
             assert(diag == myscore || diag + 1 == myscore);
-            r       = (diag == myscore ? static_cast<int8_t>(AlignmentState::match) : static_cast<int8_t>(AlignmentState::mismatch));
+            r       = (diag == myscore ? '=' : 'M');
             myscore = diag;
             --i;
             --j;
         }
-        path[pos] = r;
-        ++pos;
+        if (prev_r != r)
+        {
+            if (prev_r != 0)
+            {
+                path[pos]       = prev_r;
+                path_count[pos] = r_count;
+                ++pos;
+            }
+            prev_r  = r;
+            r_count = 0;
+        }
+        ++r_count;
+    }
+    if (i > 0 && prev_r != 'D')
+    {
+        if (prev_r != 0)
+        {
+            path[pos]       = prev_r;
+            path_count[pos] = r_count;
+            ++pos;
+        }
+        r_count = 0;
+        prev_r  = 'D';
     }
     while (i > 0)
     {
-        path[pos] = static_cast<int8_t>(AlignmentState::deletion);
-        ++pos;
+        ++r_count;
         --i;
+    }
+    if (j > 0 && prev_r != 'I')
+    {
+        if (prev_r != 0)
+        {
+            path[pos]       = prev_r;
+            path_count[pos] = r_count;
+            ++pos;
+        }
+        r_count = 0;
+        prev_r  = 'I';
     }
     while (j > 0)
     {
-        path[pos] = static_cast<int8_t>(AlignmentState::insertion);
-        ++pos;
+        ++r_count;
         --j;
+    }
+    if (r_count != 0)
+    {
+        assert(prev_r != 0);
+        path[pos]       = prev_r;
+        path_count[pos] = r_count;
+        ++pos;
     }
     return pos;
 }
@@ -766,7 +825,8 @@ myers_compute_scores_edit_dist_banded(
 }
 
 __global__ void myers_banded_kernel(
-    int8_t* paths_base,
+    int8_t* const paths_base,
+    int32_t* const path_counts_base,
     int32_t* path_lengths,
     int64_t const* path_starts,
     batched_device_matrices<WordType>::device_interface* pvi,
@@ -789,7 +849,6 @@ __global__ void myers_banded_kernel(
     const int32_t query_size  = target - query;
     const int32_t target_size = sequences_d + sequence_starts_d[2 * alignment_idx + 2] - target;
     const int32_t n_words     = ceiling_divide(query_size, word_size);
-    int8_t* path              = paths_base + path_starts[alignment_idx];
     if (max_bandwidth - 1 < abs(target_size - query_size))
     {
         if (threadIdx.x == 0)
@@ -869,9 +928,11 @@ __global__ void myers_banded_kernel(
         int32_t path_length = 0;
         if (band_width != 0)
         {
-            path_length = band_width > 0 ? 1 : -1;
-            band_width  = abs(band_width);
-            path_length *= myers_backtrace_banded(path, pv, mv, score, diagonal_begin, diagonal_end, band_width, target_size, query_size);
+            char* const path           = reinterpret_cast<char*>(paths_base + path_starts[alignment_idx]);
+            int32_t* const path_counts = path_counts_base + path_starts[alignment_idx];
+            path_length                = band_width > 0 ? 1 : -1;
+            band_width                 = abs(band_width);
+            path_length *= myers_backtrace_banded(path, path_counts, pv, mv, score, diagonal_begin, diagonal_end, band_width, target_size, query_size);
         }
         path_lengths[alignment_idx] = path_length;
     }
@@ -989,7 +1050,7 @@ void myers_gpu(int8_t* paths_d, int32_t* path_lengths_d, int32_t max_path_length
     GW_CU_CHECK_ERR(cudaPeekAtLastError());
 }
 
-void myers_banded_gpu(int8_t* paths_d, int32_t* path_lengths_d, int64_t const* path_starts_d,
+void myers_banded_gpu(int8_t* paths_d, int32_t* path_count_d, int32_t* path_lengths_d, int64_t const* path_starts_d,
                       char const* sequences_d,
                       int64_t const* sequence_starts_d,
                       int32_t n_alignments,
@@ -1002,7 +1063,7 @@ void myers_banded_gpu(int8_t* paths_d, int32_t* path_lengths_d, int64_t const* p
 {
     const dim3 threads(warp_size, 1, 1);
     const dim3 blocks(n_alignments, 1, 1);
-    myers::myers_banded_kernel<<<blocks, threads, 0, stream>>>(paths_d, path_lengths_d, path_starts_d,
+    myers::myers_banded_kernel<<<blocks, threads, 0, stream>>>(paths_d, path_count_d, path_lengths_d, path_starts_d,
                                                                pv.get_device_interface(), mv.get_device_interface(), score.get_device_interface(), query_patterns.get_device_interface(),
                                                                sequences_d, sequence_starts_d, max_bandwidth, n_alignments);
     GW_CU_CHECK_ERR(cudaPeekAtLastError());
